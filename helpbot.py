@@ -1,0 +1,281 @@
+
+import discord
+from discord.ext import commands, tasks
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+import os
+import csv
+import json
+from dotenv import load_dotenv
+import matplotlib.pyplot as plt
+
+load_dotenv()
+
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+
+bot = commands.Bot(command_prefix='!', intents=intents)
+
+attendance_log = {}
+user_data = {}
+
+CSV_FILE = 'study_log.csv'
+
+if not os.path.isfile(CSV_FILE):
+    with open(CSV_FILE, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['User ID', 'Username', 'Date', 'Start Time', 'End Time', 'Duration (min)'])
+
+@bot.event
+async def on_ready():
+    print(f'{bot.user} 작동 시작!')
+    encourage_message_loop.start()
+    weekly_reset_loop.start()
+    daily_study_reminder.start()
+    weekly_summary_dm.start()
+
+@bot.event
+async def on_member_join(member):
+    try:
+        await member.send("안녕하세요! 캠스터디에 오신 것을 환영합니다 😊\n공부 시간은 !입장 / !퇴장 명령어로 기록하실 수 있어요.\n자세한 건 공지를 참고해주세요!")
+    except discord.Forbidden:
+        print(f"{member}님에게 DM을 보낼 수 없습니다.")
+
+@bot.command()
+async def 입장(ctx):
+    try:
+        user = ctx.author
+        now = datetime.now(ZoneInfo("Asia/Seoul"))
+        attendance_log[user.id] = {"입장": now, "마지막_격려": 0}
+        await ctx.send(f"{user.mention} 입장 시간 기록 완료! 🟢 {now.strftime('%H:%M:%S')}")
+    except Exception as e:
+        print("Error in 입장 command:", e)
+        await ctx.send("입장 기록 중 오류가 발생했습니다.")
+
+@bot.command()
+async def 퇴장(ctx):
+    try:
+        user = ctx.author
+        now = datetime.now(ZoneInfo("Asia/Seoul"))
+        uid = user.id
+
+        if uid in attendance_log and "입장" in attendance_log[uid]:
+            start_time = attendance_log[uid]["입장"]
+            study_duration = now - start_time
+            minutes = int(study_duration.total_seconds() / 60)
+
+            if uid not in user_data:
+                user_data[uid] = {"total": 0, "weekly": {}, "daily": {}, "monthly": {}}
+
+            user_data[uid]["total"] += minutes
+
+            today_str = now.date().isoformat()
+            month_str = now.strftime("%Y-%m")
+
+            user_data[uid]["weekly"].setdefault(today_str, 0)
+            user_data[uid]["weekly"][today_str] += minutes
+
+            user_data[uid]["daily"].setdefault(today_str, 0)
+            user_data[uid]["daily"][today_str] += minutes
+
+            user_data[uid]["monthly"].setdefault(month_str, 0)
+            user_data[uid]["monthly"][month_str] += minutes
+
+            with open(CSV_FILE, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([uid, str(user), today_str, start_time.strftime('%H:%M:%S'), now.strftime('%H:%M:%S'), minutes])
+
+            await ctx.send(f"{user.mention} 퇴장 기록 완료! 🔴 총 공부 시간: {minutes}분")
+            del attendance_log[uid]
+        else:
+            await ctx.send("입장 기록이 없습니다. 먼저 !입장을 입력해주세요.")
+    except Exception as e:
+        print("Error in 퇴장 command:", e)
+        await ctx.send("퇴장 기록 중 오류가 발생했습니다.")
+
+@bot.command()
+async def 통계(ctx, 기간: str = "주간"):
+    try:
+        user = ctx.author
+        uid = user.id
+
+        if uid not in user_data:
+            await ctx.send(f"{user.mention} 아직 기록이 없습니다.")
+            return
+
+        now = datetime.now(ZoneInfo("Asia/Seoul"))
+        if 기간 == "일간":
+            today_str = now.date().isoformat()
+            daily = user_data[uid].get("daily", {}).get(today_str, 0)
+            await ctx.send(f"📅 오늘 공부 시간: {daily}분")
+        elif 기간 == "월간":
+            month_str = now.strftime("%Y-%m")
+            monthly = user_data[uid].get("monthly", {}).get(month_str, 0)
+            await ctx.send(f"📆 이번 달 공부 시간: {monthly}분")
+        else:
+            total = user_data[uid].get("total", 0)
+            this_week = sum(user_data[uid].get("weekly", {}).values())
+            await ctx.send(f"📊 {user.display_name}님의 공부 통계\n• 총 누적 공부 시간: {total}분\n• 이번 주 공부 시간: {this_week}분")
+    except Exception as e:
+        print("Error in 통계 command:", e)
+        await ctx.send("통계 조회 중 오류가 발생했습니다.")
+
+@bot.command()
+async def 시각화(ctx):
+    try:
+        uid = ctx.author.id
+        if uid not in user_data or "daily" not in user_data[uid]:
+            await ctx.send("기록이 부족합니다.")
+            return
+
+        days = list(user_data[uid]["daily"].keys())
+        values = list(user_data[uid]["daily"].values())
+
+        plt.figure(figsize=(10, 4))
+        plt.bar(days, values)
+        plt.title("최근 공부 시간")
+        plt.xlabel("날짜")
+        plt.ylabel("분")
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        filename = f"study_chart_{uid}.png"
+        plt.savefig(filename)
+        plt.close()
+
+        await ctx.author.send(file=discord.File(filename))
+        os.remove(filename)
+    except Exception as e:
+        print("Error in 시각화 command:", e)
+        await ctx.send("시각화 중 오류가 발생했습니다.")
+
+@bot.command()
+async def 도움말(ctx):
+    try:
+        help_text = (
+            "📌 **스터디 봇 명령어 안내**\n"
+            "• !입장 : 공부 시작 시간 기록\n"
+            "• !퇴장 : 공부 종료 및 시간 계산\n"
+            "• !통계 : 총 공부 시간 및 주간/일간/월간 통계 조회 (!통계 일간, !통계 월간)\n"
+            "• !시각화 : 개인 공부 시간 그래프 출력 (DM으로 전송됨)\n"
+            "• 평일 저녁 8시 자동 알림\n"
+            "• 퇴장 없이 6시간 경과 시 자동 퇴장 및 알림\n"
+            "• 매주 토요일 오전 8시 주간 리포트 자동 DM 발송\n"
+        )
+        await ctx.send(help_text)
+    except Exception as e:
+        print("Error in 도움말 command:", e)
+        await ctx.send("도움말 제공 중 오류가 발생했습니다.")
+
+@bot.event
+async def on_command_error(ctx, error):
+    print(f"Error in command {ctx.command}: {error}")
+    await ctx.send("명령어 실행 중 오류가 발생했습니다.")
+
+@tasks.loop(minutes=10)
+async def encourage_message_loop():
+    try:
+        now = datetime.now(ZoneInfo("Asia/Seoul"))
+        today_str = now.date().isoformat()
+
+        to_remove = []
+        for uid, log in attendance_log.items():
+            start_time = log["입장"]
+            duration = int((now - start_time).total_seconds() / 60)
+            hours = duration // 60
+
+            if hours > log.get("마지막_격려", 0):
+                user = await bot.fetch_user(uid)
+                try:
+                    await user.send(f"🎉 {hours}시간 돌파! 계속해서 힘내세요! 💪")
+                except Exception as e:
+                    print(f"Error sending encouragement to {uid}: {e}")
+                attendance_log[uid]["마지막_격려"] = hours
+
+            if duration >= 360:
+                user = await bot.fetch_user(uid)
+                try:
+                    await user.send("⏰ 6시간이 지나 자동 퇴장 처리되었습니다. 내일도 파이팅!")
+                except Exception as e:
+                    print(f"Error sending auto-logout message to {uid}: {e}")
+                to_remove.append(uid)
+
+        for uid in to_remove:
+            del attendance_log[uid]
+    except Exception as e:
+        print("Error in encourage_message_loop:", e)
+
+@tasks.loop(hours=1)
+async def weekly_reset_loop():
+    try:
+        now = datetime.now(ZoneInfo("Asia/Seoul"))
+        if now.weekday() == 0 and now.hour == 0:
+            backup_name = f"weekly_backup_{now.strftime('%Y-%m-%d')}.json"
+            backup_data = {uid: data.get("weekly", {}) for uid, data in user_data.items()}
+
+            with open(backup_name, 'w', encoding='utf-8') as f:
+                json.dump(backup_data, f, ensure_ascii=False, indent=2)
+
+            for uid in user_data:
+                user_data[uid]["weekly"] = {}
+
+            print("✅ 주간 기록이 초기화되었습니다. 백업 완료: ", backup_name)
+    except Exception as e:
+        print("Error in weekly_reset_loop:", e)
+
+@tasks.loop(minutes=1)
+async def daily_study_reminder():
+    try:
+        now = datetime.now(ZoneInfo("Asia/Seoul"))
+        if now.weekday() < 5 and now.hour == 20 and now.minute == 0:
+            channel = None
+            for ch in bot.get_all_channels():
+                if (
+                    ch.name == '일반'
+                    and ch.category
+                    and ch.category.name == '스터디 채널'
+                    and isinstance(ch, discord.TextChannel)
+                ):
+                    channel = ch
+                    break
+            if channel:
+                await channel.send("⏰ 스터디 시간입니다! 집중 모드 ON! 💻")
+            else:
+                print("스터디 채널 > 일반 채널을 찾을 수 없습니다.")
+    except Exception as e:
+        print("Error in daily_study_reminder:", e)
+
+@tasks.loop(hours=1)
+async def weekly_summary_dm():
+    try:
+        now = datetime.now(ZoneInfo("Asia/Seoul"))
+        if now.weekday() == 5 and now.hour == 8:
+            for uid, data in user_data.items():
+                user = await bot.fetch_user(uid)
+                weekly_sum = sum(data.get("weekly", {}).values())
+
+                days = list(data.get("weekly", {}).keys())
+                values = list(data.get("weekly", {}).values())
+                if not days:
+                    continue
+
+                plt.figure(figsize=(10, 4))
+                plt.bar(days, values)
+                plt.title("이번 주 공부 시간")
+                plt.xlabel("날짜")
+                plt.ylabel("분")
+                plt.xticks(rotation=45)
+                plt.tight_layout()
+                filename = f"weekly_chart_{uid}.png"
+                plt.savefig(filename)
+                plt.close()
+
+                try:
+                    await user.send(f"📈 이번 주 공부 요약\n총 공부 시간: {weekly_sum}분", file=discord.File(filename))
+                except Exception as e:
+                    print(f"Error sending weekly summary to {uid}: {e}")
+                os.remove(filename)
+    except Exception as e:
+        print("Error in weekly_summary_dm:", e)
+
+bot.run(os.getenv("DISCORD_TOKEN"))
