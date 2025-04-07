@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: discordbot-keepalive
+    env: python
+    buildCommand: ""
+    startCommand: "python main.py"
+    plan: free
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: STUDY_CHANNEL_ID
+        sync: false
